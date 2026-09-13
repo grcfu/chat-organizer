@@ -259,6 +259,35 @@
       return row;
     },
 
+    /* Read enough of the open conversation to summarise it: the first user
+       message and the first model response. */
+    async scrapeOpenThread() {
+      const thread = await waitFor(() => qs(CONFIG.SELECTORS.mainThread), {
+        timeout: CONFIG.TIMING.threadRender,
+        message: 'Conversation pane never rendered',
+      });
+
+      const firstUser = await waitFor(
+        () => qs(CONFIG.SELECTORS.userMessage, thread),
+        { timeout: CONFIG.TIMING.threadRender, message: 'No messages found in that chat' }
+      );
+
+      // The model's reply streams in; give it a moment, but don't block on it.
+      let firstModel = null;
+      try {
+        firstModel = await waitFor(() => qs(CONFIG.SELECTORS.modelMessage, thread), {
+          timeout: 2500,
+        });
+      } catch {
+        // A chat with no reply yet is still summarisable from the prompt alone.
+      }
+
+      const parts = [`User: ${textOf(firstUser)}`];
+      if (firstModel) parts.push(`Assistant: ${textOf(firstModel)}`);
+      // Keep the payload small: a couple of sentences needs nothing more.
+      return parts.join('\n\n').slice(0, 4000);
+    },
+
     /* The confirming button inside the modal, matched by visible text. */
     dialogConfirmButton() {
       const dialog = qsa(CONFIG.SELECTORS.dialog).find((el) => el.offsetParent !== null);
@@ -430,6 +459,28 @@
 
     .row.selected { background: var(--bg-sunk); }
 
+    .row-summary {
+      margin: 3px 0 0;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--fg-dim);
+    }
+
+    .row-summary.dim { font-style: italic; }
+
+    .row-action { padding: 2px 0; font-size: 11px; }
+    .row-action:hover { background: transparent; text-decoration: underline; }
+
+    .summary-hint {
+      margin: 0;
+      padding: 8px 16px;
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--fg-dim);
+    }
+
+    .summary-hint button { font-size: 12px; }
+
     .row-title {
       display: block;
       width: 100%;
@@ -536,6 +587,10 @@
     deleting: false,
     aborted: false,
     progress: { done: 0, total: 0 },
+    summaries: {},      // chat id -> summary text, mirrored from storage
+    summarizing: null,  // chat id currently being summarized
+    confirmingSummary: 0,
+    hasKey: false,
   };
 
   const ui = { host: null, root: null, panel: null };
@@ -581,6 +636,8 @@
         <button class="link-btn" data-action="select-all">Select all</button>
         <button class="link-btn" data-action="clear">Clear</button>
         <button class="link-btn" data-action="load-older">Load older</button>
+        <button class="link-btn" data-action="summarize-all" hidden
+                data-role="summarize-all">Summarize loaded</button>
         <span class="selected-count" data-role="selected"></span>
       </div>
 
@@ -646,6 +703,12 @@
       if (chat) jumpToChat(chat);
       return;
     }
+
+    if (action === 'summarize') {
+      const chat = state.chats.find((c) => c.id === actionEl.dataset.id);
+      if (chat) summarizeOne(chat);
+      return;
+    }
     if (action === 'close') closePanel();
     else if (action === 'refresh') refresh();
     else if (action === 'load-older') loadOlderChats();
@@ -655,6 +718,12 @@
     else if (action === 'confirm-delete') confirmDelete();
     else if (action === 'cancel-delete') cancelDelete();
     else if (action === 'stop-delete') stopDelete();
+    else if (action === 'summarize-all') requestBatchSummarize();
+    else if (action === 'confirm-summarize') confirmBatchSummarize();
+    else if (action === 'cancel-summarize') cancelBatchSummarize();
+    else if (action === 'open-options') {
+      chrome.runtime.sendMessage({ type: 'GCO_OPEN_OPTIONS' });
+    }
   }
 
   function onPanelInput(event) {
@@ -690,6 +759,10 @@
   function openPanel() {
     buildPanel();
   keepPanelMounted();
+
+  loadSummaryCache().then(checkApiKey).then(() => {
+    if (state.open) render();
+  });
     state.open = true;
     ui.host.classList.add('open');
     ui.panel.focus();
@@ -857,6 +930,11 @@
 
     if (key === 'Escape') {
       event.preventDefault();
+      if (state.summarizing) {
+        state.aborted = true;
+        setStatus('Stopping after the current chat\u2026');
+        return;
+      }
       // Escape clears a selection first; only closes the panel when there is
       // nothing selected to clear.
       if (state.selected.size) clearSelection();
@@ -889,6 +967,21 @@
           <button class="link-btn" data-action="stop-delete">Stop</button>
         </div>
         <div class="progress-track"><div class="progress-bar" style="width:${pct}%"></div></div>
+      `;
+      return;
+    }
+
+    if (state.confirmingSummary) {
+      const count = state.confirmingSummary;
+      foot.innerHTML = `
+        <p class="confirm-text">
+          Summarize ${count} chat${count === 1 ? '' : 's'}? Each one is opened in
+          turn, so the page will navigate and any unsent draft will be lost.
+        </p>
+        <div class="confirm-actions">
+          <button class="link-btn" data-action="cancel-summarize">Cancel</button>
+          <button class="danger" data-action="confirm-summarize">Summarize ${count}</button>
+        </div>
       `;
       return;
     }
@@ -978,6 +1071,28 @@
       title.dataset.id = chat.id;
 
       body.appendChild(title);
+
+      const summary = state.summaries[chat.id];
+      if (summary) {
+        const line = document.createElement('p');
+        line.className = 'row-summary';
+        line.textContent = summary;
+        body.appendChild(line);
+      } else if (state.summarizing === chat.id) {
+        const line = document.createElement('p');
+        line.className = 'row-summary dim';
+        line.textContent = 'Summarising\u2026';
+        body.appendChild(line);
+      } else if (state.hasKey) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'link-btn row-action';
+        btn.textContent = 'Summarize';
+        btn.dataset.action = 'summarize';
+        btn.dataset.id = chat.id;
+        body.appendChild(btn);
+      }
+
       row.append(box, body);
       frag.appendChild(row);
     }
@@ -985,6 +1100,28 @@
     list.innerHTML = '';
     list.appendChild(frag);
     renderCounters();
+    renderSummaryAffordances();
+  }
+
+  /* With no API key the panel is still complete and useful - one quiet link,
+     no banner, no nagging. */
+  function renderSummaryAffordances() {
+    const batchBtn = $('[data-role="summarize-all"]');
+    if (batchBtn) batchBtn.hidden = !state.hasKey;
+
+    const existing = $('.summary-hint');
+    if (state.hasKey) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+
+    const hint = document.createElement('p');
+    hint.className = 'summary-hint';
+    hint.innerHTML =
+      'Optional AI summaries are off. ' +
+      '<button class="link-btn" data-action="open-options">Add an API key</button>';
+    $('[data-role="foot"]')?.before(hint);
   }
 
   // ---------------------------------------------------------------------------
@@ -1001,6 +1138,138 @@
     } catch (err) {
       setStatus(`Could not open that chat: ${err?.message || err}`);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Summaries (optional)
+  //
+  // Secondary to jump-to-chat: generating one navigates to the chat anyway, so
+  // it only pays off on re-read, from the cache. Everything else in the panel
+  // works with no API key ever configured.
+  // ---------------------------------------------------------------------------
+
+  const SUMMARY_CACHE_KEY = 'summaries';
+
+  async function loadSummaryCache() {
+    const stored = await chrome.storage.local.get(SUMMARY_CACHE_KEY);
+    state.summaries = stored[SUMMARY_CACHE_KEY] || {};
+  }
+
+  async function saveSummary(id, summary) {
+    state.summaries[id] = summary;
+    await chrome.storage.local.set({ [SUMMARY_CACHE_KEY]: state.summaries });
+  }
+
+  /* Deleted chats can never be re-read, so their cached summaries are dead
+     weight. Drop them as part of the delete flow. */
+  async function forgetSummaries(ids) {
+    let changed = false;
+    for (const id of ids) {
+      if (id in state.summaries) {
+        delete state.summaries[id];
+        changed = true;
+      }
+    }
+    if (changed) await chrome.storage.local.set({ [SUMMARY_CACHE_KEY]: state.summaries });
+  }
+
+  async function checkApiKey() {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'GCO_HAS_KEY' });
+      state.hasKey = Boolean(res?.hasKey);
+    } catch {
+      state.hasKey = false;
+    }
+  }
+
+  /* Open the chat, scrape it, send the text to the worker, restore the view.
+     This visibly navigates the page, which is why it is never automatic. */
+  async function summarizeChat(chat) {
+    if (state.summaries[chat.id]) return state.summaries[chat.id];
+
+    state.summarizing = chat.id;
+    render();
+
+    const returnTo = location.href;
+
+    try {
+      await adapter.openConversation(chat);
+      const text = await adapter.scrapeOpenThread();
+
+      const res = await chrome.runtime.sendMessage({ type: 'GCO_SUMMARIZE', text });
+      if (!res?.ok) throw new Error(res?.error || 'Summary failed');
+
+      await saveSummary(chat.id, res.summary);
+      return res.summary;
+    } finally {
+      state.summarizing = null;
+      // Put the user back where they were.
+      if (location.href !== returnTo) history.back();
+      refresh();
+    }
+  }
+
+  async function summarizeOne(chat) {
+    try {
+      await summarizeChat(chat);
+      setStatus('');
+    } catch (err) {
+      setStatus(`Could not summarise \u201c${chat.title}\u201d: ${err?.message || err}`);
+    }
+  }
+
+  async function runBatchSummarize() {
+    const pending = visibleChats()
+      .filter((chat) => !state.summaries[chat.id])
+      .slice(0, CONFIG.LIMITS.batchSummarize);
+
+    if (!pending.length) {
+      setStatus('Every loaded chat already has a summary.');
+      return;
+    }
+
+    state.aborted = false;
+    let done = 0;
+    let failed = 0;
+
+    for (const chat of pending) {
+      if (state.aborted) break;
+      setStatus(`Summarising ${done + failed + 1} / ${pending.length}\u2026 (Escape to stop)`);
+      try {
+        await summarizeChat(chat);
+        done += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn(`[GCO] summary failed for "${chat.title}":`, err?.message || err);
+      }
+      await sleep(randomDelay());
+    }
+
+    setStatus(failed ? `${done} summarised, ${failed} failed.` : `${done} summarised.`);
+    render();
+  }
+
+  function requestBatchSummarize() {
+    const pending = visibleChats().filter((chat) => !state.summaries[chat.id]);
+    const n = Math.min(pending.length, CONFIG.LIMITS.batchSummarize);
+    if (!n) {
+      setStatus('Every loaded chat already has a summary.');
+      return;
+    }
+
+    state.confirmingSummary = n;
+    render();
+  }
+
+  function confirmBatchSummarize() {
+    state.confirmingSummary = 0;
+    render();
+    runBatchSummarize();
+  }
+
+  function cancelBatchSummarize() {
+    state.confirmingSummary = 0;
+    render();
   }
 
   // ---------------------------------------------------------------------------
@@ -1051,6 +1320,7 @@
       try {
         await deleteChat(chat);
         state.selected.delete(chat.id);
+        await forgetSummaries([chat.id]);
         done += 1;
       } catch (err) {
         failed += 1;
@@ -1166,4 +1436,8 @@
 
   buildPanel();
   keepPanelMounted();
+
+  loadSummaryCache().then(checkApiKey).then(() => {
+    if (state.open) render();
+  });
 })();
