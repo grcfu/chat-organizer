@@ -407,6 +407,7 @@
     // re-enumeration after a refresh or a delete.
     selected: new Set(),
     lastClickedId: null,
+    suppressChange: false,
   };
 
   const ui = { host: null, root: null, panel: null };
@@ -430,6 +431,7 @@
     panel.className = 'panel';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', 'Gemini chat organizer');
+    panel.tabIndex = -1;
     panel.innerHTML = `
       <header class="head">
         <div class="title">
@@ -484,9 +486,29 @@
 
     panel.addEventListener('click', onPanelClick);
     panel.addEventListener('change', onPanelChange);
+    // Shortcuts are bound to the panel, not the document, so Cmd/Ctrl+A never
+    // hijacks select-all elsewhere on the Gemini page.
+    panel.addEventListener('keydown', onPanelKeydown);
   }
 
   function onPanelClick(event) {
+    // Clear the suppression flag at the start of every click rather than
+    // trusting `change` to clear it: a shift+click re-renders the list, which
+    // detaches the checkbox before its change event can bubble here. Left
+    // sticky, that flag would swallow the next plain click.
+    state.suppressChange = false;
+
+    const box = event.target.closest('input[type="checkbox"]');
+    if (box) {
+      // A checkbox's checked state is already updated by the time the click
+      // listener runs, so `box.checked` is the state the user just asked for.
+      if (event.shiftKey && state.lastClickedId) {
+        applyRange(state.lastClickedId, box.dataset.id, box.checked);
+        state.suppressChange = true;
+      }
+      return;
+    }
+
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (!action) return;
     if (action === 'close') closePanel();
@@ -499,6 +521,12 @@
   function onPanelChange(event) {
     const box = event.target;
     if (box?.type !== 'checkbox') return;
+
+    if (state.suppressChange) {
+      // A shift+click already handled this as a range.
+      state.suppressChange = false;
+      return;
+    }
 
     const id = box.dataset.id;
     setSelected(id, box.checked);
@@ -515,6 +543,7 @@
     buildPanel();
     state.open = true;
     ui.host.classList.add('open');
+    ui.panel.focus();
     refresh();
     if (!state.loadedOnce && !state.error) {
       state.loadedOnce = true;
@@ -648,6 +677,40 @@
   function clearSelection() {
     state.selected.clear();
     render();
+  }
+
+  /* Gmail behaviour: shift+click sets every row between the last-clicked row
+     and this one to the clicked box's new state. Operates on the filtered
+     view, so a range never reaches rows the user can't see. */
+  function applyRange(fromId, toId, on) {
+    const chats = visibleChats();
+    const from = chats.findIndex((chat) => chat.id === fromId);
+    const to = chats.findIndex((chat) => chat.id === toId);
+    if (from === -1 || to === -1) return;
+
+    const [start, end] = from <= to ? [from, to] : [to, from];
+    for (let i = start; i <= end; i += 1) setSelected(chats[i].id, on);
+
+    state.lastClickedId = toId;
+    render();
+  }
+
+  function onPanelKeydown(event) {
+    const key = event.key;
+
+    if ((event.metaKey || event.ctrlKey) && key.toLowerCase() === 'a') {
+      event.preventDefault();
+      selectAllVisible();
+      return;
+    }
+
+    if (key === 'Escape') {
+      event.preventDefault();
+      // Escape clears a selection first; only closes the panel when there is
+      // nothing selected to clear.
+      if (state.selected.size) clearSelection();
+      else closePanel();
+    }
   }
 
   function renderCounters() {
