@@ -329,6 +329,17 @@
 
     .row-body { min-width: 0; flex: 1; }
 
+    .row input[type="checkbox"] {
+      margin: 2px 0 0;
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      flex: none;
+      cursor: pointer;
+    }
+
+    .row.selected { background: var(--bg-sunk); }
+
     .row-title {
       display: block;
       width: 100%;
@@ -392,6 +403,10 @@
     loadedOnce: false,
     chats: [],
     error: null,
+    // Selection is keyed by chat id, not by element or index, so it survives
+    // re-enumeration after a refresh or a delete.
+    selected: new Set(),
+    lastClickedId: null,
   };
 
   const ui = { host: null, root: null, panel: null };
@@ -468,6 +483,7 @@
     ui.panel = panel;
 
     panel.addEventListener('click', onPanelClick);
+    panel.addEventListener('change', onPanelChange);
   }
 
   function onPanelClick(event) {
@@ -476,6 +492,19 @@
     if (action === 'close') closePanel();
     else if (action === 'refresh') refresh();
     else if (action === 'load-older') loadOlderChats();
+    else if (action === 'select-all') selectAllVisible();
+    else if (action === 'clear') clearSelection();
+  }
+
+  function onPanelChange(event) {
+    const box = event.target;
+    if (box?.type !== 'checkbox') return;
+
+    const id = box.dataset.id;
+    setSelected(id, box.checked);
+    state.lastClickedId = id;
+    box.closest('.row')?.classList.toggle('selected', box.checked);
+    renderCounters();
   }
 
   // ---------------------------------------------------------------------------
@@ -547,6 +576,17 @@
       title: adapter.titleFor(el) || '(untitled chat)',
       el,
     }));
+
+    pruneSelection();
+  }
+
+  /* Drop selected ids that no longer exist, so a refresh keeps the rest of the
+     selection intact instead of silently resetting it. */
+  function pruneSelection() {
+    const live = new Set(state.chats.map((chat) => chat.id));
+    for (const id of Array.from(state.selected)) {
+      if (!live.has(id)) state.selected.delete(id);
+    }
   }
 
   function refresh() {
@@ -595,6 +635,32 @@
     return state.chats;
   }
 
+  function setSelected(id, on) {
+    if (on) state.selected.add(id);
+    else state.selected.delete(id);
+  }
+
+  function selectAllVisible() {
+    for (const chat of visibleChats()) state.selected.add(chat.id);
+    render();
+  }
+
+  function clearSelection() {
+    state.selected.clear();
+    render();
+  }
+
+  function renderCounters() {
+    const selectedEl = $('[data-role="selected"]');
+    if (selectedEl) {
+      const n = state.selected.size;
+      selectedEl.textContent = n ? `${n} selected` : '';
+    }
+
+    const deleteBtn = $('[data-action="delete"]');
+    if (deleteBtn) deleteBtn.disabled = state.selected.size === 0;
+  }
+
   function render() {
     if (!ui.root) return;
     const list = $('[data-role="list"]');
@@ -619,12 +685,14 @@
         'sidebar structure, then update <code>CONFIG.SELECTORS</code> in ' +
         '<code>content.js</code>.';
       list.append(notice, hint);
+      renderCounters();
       return;
     }
 
     const chats = visibleChats();
     if (!chats.length) {
       list.innerHTML = '<p class="empty">No chats loaded yet.</p>';
+      renderCounters();
       return;
     }
 
@@ -633,6 +701,13 @@
       const row = document.createElement('div');
       row.className = 'row';
       row.dataset.id = chat.id;
+
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = state.selected.has(chat.id);
+      box.dataset.id = chat.id;
+      box.setAttribute('aria-label', `Select ${chat.title}`);
+      if (box.checked) row.classList.add('selected');
 
       const body = document.createElement('div');
       body.className = 'row-body';
@@ -643,12 +718,13 @@
       title.title = chat.title;
 
       body.appendChild(title);
-      row.appendChild(body);
+      row.append(box, body);
       frag.appendChild(row);
     }
 
     list.innerHTML = '';
     list.appendChild(frag);
+    renderCounters();
   }
 
   // ---------------------------------------------------------------------------
