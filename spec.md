@@ -41,6 +41,9 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
 - Read the conversation list from Gemini's left sidebar. **Put every DOM selector in a single
   `CONFIG.SELECTORS` object at the top of `content.js`** so they're trivial to update when
   Google changes the UI.
+- **Scope enumeration to the recent-conversations container only.** The sidebar also holds
+  Gems, "Explore Gems", and nav items — skip anything that isn't a real conversation (no
+  conversation id / not inside the recent list), or bulk delete will target the wrong rows.
 - For each chat, capture: a stable-ish id (a data attribute if one exists, else derive one),
   the title text, and a live element reference.
 - **Load more:** auto-scroll the sidebar's conversation container to the bottom a few times to
@@ -54,12 +57,17 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
 - Each row has a checkbox. A plain click toggles that one.
 - **Shift+Click selects the contiguous range** between the last-clicked row and the current
   one (Gmail behavior), setting all of them to the clicked box's new state.
-- `Ctrl/Cmd+A` selects all currently-visible (filtered) rows; `Escape` clears.
+- `Ctrl/Cmd+A` selects all currently-visible (filtered) rows — **bound only while focus is
+  inside the panel's shadow root**, so it never hijacks select-all elsewhere on the page.
+- `Escape` clears the selection if anything is selected; otherwise it closes the panel.
+- Selection is keyed by chat id and **survives a refresh / re-enumeration** — ids that are
+  still present stay checked rather than silently resetting.
 - The search box filters the list live by title; range select operates on the filtered view.
 - Footer shows the live selected count; "Delete selected" is disabled at 0.
 
 ## Feature 4 — Bulk delete
-- On "Delete selected", show a confirm step: "Delete N chats? This can't be undone."
+- On "Delete selected", show a confirm step **inside the panel** (not `window.confirm`):
+  "Delete N chats? This can't be undone." with confirm / cancel buttons.
 - Then process the queue **sequentially**. For each chat, drive Gemini's own delete flow:
   1. **Re-find the row fresh** — the list re-renders after each delete, so never reuse a stale
      element reference. Match by the captured id, fall back to title.
@@ -75,11 +83,17 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
 - Show a live progress bar ("Deleting 4 / 12…") and a **Stop** button that aborts the rest of
   the queue.
 - On finish, show a summary ("10 deleted, 2 failed") and refresh the list.
+- **Purge each successfully deleted chat's cached summary** from `chrome.storage.local` so the
+  cache can't grow unbounded with entries for chats that no longer exist.
 
 ## Feature 5 — AI summaries (on demand)
 - Titles render immediately. Summaries are generated **on demand, not automatically** (they're
   slow and use API quota), and **cached**.
 - Provide a per-row "Summarize" action plus a "Summarize loaded" batch action.
+- **"Summarize loaded" navigates the page once per chat**, so treat it like bulk delete: an
+  in-panel confirm up front, a live progress bar, and a **Stop** button. **Cap each run at 20
+  chats** and say so in the confirm text. Warn that it will navigate away from the current view
+  (any unsent draft in the composer will be lost).
 - To summarize a chat, the content script reads its text: programmatically open that
   conversation, wait for the main thread to render, scrape the **first user message + first
   model response** (enough for a 1–2 sentence summary), then restore the user's previous view.
@@ -89,9 +103,20 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
   keyed by chat id (skip anything already cached).
 - **Provider:** default to the **Google Gemini API** (`generativelanguage.googleapis.com`) —
   it has a free tier, fitting for a Gemini tool. Make provider / model / API key configurable
-  on the options page. Structure the API layer as a small adapter so `api.anthropic.com`
+  on the options page. The **model is a free-text field with a documented default**, not a
+  hardcoded name — so the extension keeps working when Google retires a model id. Structure the API layer as a small adapter so `api.anthropic.com`
   (Claude) or OpenAI can be dropped in later. Add the chosen API host to `host_permissions`.
 - If no API key is set, disable the summary actions and point the user to the options page.
+
+## Feature 6 — Jump to a chat
+- Each row's **title is clickable** and opens that conversation in the main pane (click the
+  underlying sidebar item so it's a normal SPA route change, not a full page load). The
+  checkbox and the rest of the row still handle selection, so clicking a title never toggles
+  a checkbox by accident.
+- **The panel stays open across the jump** — guard against double-injection and re-render the
+  panel if Gemini's SPA navigation tears it down, preserving the current selection and search
+  filter so triage isn't interrupted.
+- Same navigation helper as the summary scrape, minus the "restore previous view" step.
 
 ## manifest.json essentials
 - `manifest_version: 3`; name, `version: "0.1.0"`, description.
@@ -99,6 +124,8 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
 - `background.service_worker: "background.js"`.
 - `content_scripts` matching `https://gemini.google.com/*` at `document_idle`.
 - `host_permissions`: the AI API host.
+- `options_page: "options.html"` (or `options_ui` with `open_in_tab: false`) — the options
+  page must actually be wired up, not just present as a file.
 - `permissions`: `["storage"]`.
 - `icons`: 16 / 48 / 128.
 
