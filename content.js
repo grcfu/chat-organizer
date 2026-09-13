@@ -651,6 +651,54 @@
     list.appendChild(frag);
   }
 
+  // ---------------------------------------------------------------------------
+  // Diagnostics - run __gcoDiagnose() from the console to see what each
+  // selector currently matches. In DevTools, switch the console's context
+  // dropdown from "top" to "Gemini Chat Organizer" first; content scripts run
+  // in an isolated world.
+  // ---------------------------------------------------------------------------
+
+  function diagnose() {
+    const report = {};
+    console.group('[GCO] selector diagnostics');
+
+    for (const [name, selector] of Object.entries(CONFIG.SELECTORS)) {
+      const matches = qsa(selector);
+      report[name] = matches.length;
+      console.log(
+        `%c${name}%c  ${matches.length} match(es)`,
+        'font-weight:600',
+        'color:inherit',
+        selector
+      );
+      if (matches[0]) console.log('   first match:', matches[0]);
+    }
+
+    const container = adapter.listContainer();
+    if (container) {
+      console.log('conversation container:', container);
+      console.log(
+        'direct children tag/class:',
+        Array.from(container.children).slice(0, 10).map(
+          (el) => `${el.tagName.toLowerCase()}.${el.className || '(no class)'}`
+        )
+      );
+    } else {
+      console.warn('No conversation container matched - fix `conversationList` first.');
+    }
+
+    const rows = adapter.rowElements();
+    console.log(`enumerated ${rows.length} row(s)`);
+    rows.slice(0, 5).forEach((el, i) => {
+      console.log(`  [${i}] id=${adapter.idFor(el, i)} title=${adapter.titleFor(el)}`, el);
+    });
+
+    console.groupEnd();
+    return report;
+  }
+
+  window.__gcoDiagnose = diagnose;
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'GCO_TOGGLE_PANEL') togglePanel();
   });
