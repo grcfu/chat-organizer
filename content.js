@@ -10,6 +10,178 @@
 
   const HOST_ID = 'gemini-chat-organizer-host';
 
+  // ---------------------------------------------------------------------------
+  // CONFIG - every fragile DOM selector in the extension lives in this one
+  // object. When Google changes Gemini's markup, this is the only block you
+  // should need to edit. See README > "Fixing selectors" for how to find new
+  // ones. Each entry is a comma-separated fallback list, tried left to right;
+  // prefer role/aria/data-test-id hooks over generated class names.
+  // ---------------------------------------------------------------------------
+  const CONFIG = {
+    SELECTORS: {
+      // The left sidebar as a whole. Used only to fail loudly when Gemini's
+      // chrome is missing entirely (signed out, or a full redesign).
+      sidebarRoot: [
+        'bard-sidenav',
+        '[data-test-id="side-nav"]',
+        'nav[role="navigation"]',
+      ].join(', '),
+
+      // The scrolling container that holds recent conversations. We scroll
+      // this element to force Gemini to lazy-load older chats.
+      conversationList: [
+        '[data-test-id="conversation-list"]',
+        '.conversations-container',
+        'conversations-list',
+      ].join(', '),
+
+      // One row per conversation. Must match ONLY real chats - not Gems, not
+      // "Explore Gems", not nav links.
+      conversationItem: [
+        '[data-test-id="conversation"]',
+        '.conversation-items-container .conversation',
+      ].join(', '),
+
+      // The visible title inside a conversation row.
+      conversationTitle: [
+        '[data-test-id="conversation-title"]',
+        '.conversation-title',
+      ].join(', '),
+
+      // The per-row kebab / "more options" button. Often only rendered on
+      // hover, so we dispatch a mouseover before looking for it.
+      moreButton: [
+        '[data-test-id="actions-menu-button"]',
+        'button[aria-label*="option" i]',
+        'button[aria-label*="more" i]',
+      ].join(', '),
+
+      // Items inside the popup menu that the kebab opens.
+      menuItem: [
+        '[role="menuitem"]',
+        '.mat-mdc-menu-item',
+      ].join(', '),
+
+      // The confirmation dialog and its buttons.
+      dialog: [
+        '[role="dialog"]',
+        'mat-dialog-container',
+      ].join(', '),
+      dialogButton: 'button',
+
+      // Main conversation pane, used when scraping a chat for a summary.
+      mainThread: [
+        'chat-window',
+        'main [role="log"]',
+        'main',
+      ].join(', '),
+      userMessage: [
+        'user-query',
+        '[data-test-id="user-query"]',
+        '.query-text',
+      ].join(', '),
+      modelMessage: [
+        'model-response',
+        '[data-test-id="model-response"]',
+        'message-content',
+      ].join(', '),
+    },
+
+    // Visible button text, matched case-insensitively. Add your locale's
+    // wording here rather than touching the delete driver.
+    LABELS: {
+      delete: ['delete', 'remove', 'löschen', 'supprimer', 'eliminar', 'elimina'],
+      confirm: ['delete', 'remove', 'confirm', 'löschen', 'supprimer', 'eliminar'],
+    },
+
+    TIMING: {
+      waitTimeout: 8000,      // give up on a menu/dialog after this long
+      waitInterval: 120,      // how often waitFor() re-checks
+      deleteDelayMin: 500,    // gap between deletions - gentler on the UI and
+      deleteDelayMax: 900,    // avoids tripping abuse detection
+      loadMoreRounds: 6,      // scroll-to-bottom passes when loading older chats
+      loadMoreSettle: 700,    // wait after each scroll for lazy-load to fire
+      threadRender: 6000,     // wait for a conversation to render when scraping
+    },
+
+    LIMITS: {
+      batchSummarize: 20,     // max chats per "Summarize loaded" run
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Small DOM / async helpers
+  // ---------------------------------------------------------------------------
+
+  const qs = (sel, scope = document) => scope.querySelector(sel);
+  const qsa = (sel, scope = document) => Array.from(scope.querySelectorAll(sel));
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const textOf = (el) => (el?.textContent || '').trim().replace(/\s+/g, ' ');
+
+  function randomDelay() {
+    const { deleteDelayMin: min, deleteDelayMax: max } = CONFIG.TIMING;
+    return min + Math.random() * (max - min);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Site adapter seam. Only Gemini is implemented; a second site would add
+  // another adapter with the same shape and the panel code would not change.
+  // ---------------------------------------------------------------------------
+
+  const geminiAdapter = {
+    id: 'gemini',
+    label: 'Gemini',
+
+    matches() {
+      return location.hostname === 'gemini.google.com';
+    },
+
+    /* The scrolling element that holds conversations, or null if the sidebar
+       can't be found at all (collapsed, signed out, or markup changed). */
+    listContainer() {
+      return qs(CONFIG.SELECTORS.conversationList);
+    },
+
+    sidebar() {
+      return qs(CONFIG.SELECTORS.sidebarRoot);
+    },
+
+    /* Live row elements, in sidebar order. */
+    rowElements() {
+      const container = this.listContainer();
+      if (!container) return [];
+      return qsa(CONFIG.SELECTORS.conversationItem, container);
+    },
+
+    /* A stable-ish id for a row. Gemini puts the conversation id in jslog /
+       data attributes; we fall back to a title-derived key so the row is still
+       addressable (matching then relies on the title, which is good enough). */
+    idFor(el, index) {
+      const direct =
+        el.getAttribute('data-conversation-id') ||
+        el.getAttribute('data-test-id-conversation') ||
+        el.id;
+      if (direct) return direct;
+
+      const jslog = el.getAttribute('jslog') || '';
+      const match = jslog.match(/c_[0-9a-f]{8,}/i);
+      if (match) return match[0];
+
+      const href = el.querySelector('a[href*="/app/"]')?.getAttribute('href');
+      if (href) return href.split('/').pop();
+
+      return `title:${this.titleFor(el) || `row-${index}`}`;
+    },
+
+    titleFor(el) {
+      const node = el.querySelector(CONFIG.SELECTORS.conversationTitle);
+      return textOf(node) || textOf(el);
+    },
+  };
+
+  const adapters = [geminiAdapter];
+  const adapter = adapters.find((a) => a.matches()) || geminiAdapter;
+
   // Panel styling is injected into the shadow root as a string, so Gemini's
   // stylesheets and ours can never collide. Filled in a later commit.
   const PANEL_CSS = `
