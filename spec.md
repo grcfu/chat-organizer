@@ -86,7 +86,14 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
 - **Purge each successfully deleted chat's cached summary** from `chrome.storage.local` so the
   cache can't grow unbounded with entries for chats that no longer exist.
 
-## Feature 5 — AI summaries (on demand)
+## Feature 5 — AI summaries (optional, on demand)
+- **Secondary feature.** Feature 6 (jump to a chat) is the primary way to answer "what is this
+  chat?" — it's free and instant. Summaries exist for the case jumping can't serve: **scanning
+  a large backlog in bulk**, where reading 30 one-line summaries in the list beats clicking
+  into 30 chats one at a time. Note that generating a summary navigates to the chat anyway, so
+  it only pays off on re-read, from the cache.
+- **The extension must be fully usable with no API key ever configured.** Summaries are opt-in
+  and off by default; every other feature works without them. Never nag for a key.
 - Titles render immediately. Summaries are generated **on demand, not automatically** (they're
   slow and use API quota), and **cached**.
 - Provide a per-row "Summarize" action plus a "Summarize loaded" batch action.
@@ -106,9 +113,11 @@ Keep the panel CSS as a string injected into the shadow root (no separate styles
   on the options page. The **model is a free-text field with a documented default**, not a
   hardcoded name — so the extension keeps working when Google retires a model id. Structure the API layer as a small adapter so `api.anthropic.com`
   (Claude) or OpenAI can be dropped in later. Add the chosen API host to `host_permissions`.
-- If no API key is set, disable the summary actions and point the user to the options page.
+- If no API key is set, quietly disable the summary actions with a single unobtrusive link to
+  the options page — no banner, no repeated prompting. The panel must not look broken or
+  half-configured in the no-key state; it's a valid, complete way to use the tool.
 
-## Feature 6 — Jump to a chat
+## Feature 6 — Jump to a chat (primary identify action)
 - Each row's **title is clickable** and opens that conversation in the main pane (click the
   underlying sidebar item so it's a normal SPA route change, not a full page load). The
   checkbox and the rest of the row still handle selection, so clicking a title never toggles
