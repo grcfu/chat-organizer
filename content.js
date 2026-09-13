@@ -12,7 +12,146 @@
 
   // Panel styling is injected into the shadow root as a string, so Gemini's
   // stylesheets and ours can never collide. Filled in a later commit.
-  const PANEL_CSS = '';
+  const PANEL_CSS = `
+    :host {
+      --bg: #ffffff;
+      --bg-sunk: #f6f7f9;
+      --fg: #1f2124;
+      --fg-dim: #5f6368;
+      --line: #e3e5e8;
+      --accent: #4d5bf0;
+      --danger: #c5221f;
+      --danger-bg: #fce8e6;
+      --shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :host {
+        --bg: #1e1f22;
+        --bg-sunk: #27282c;
+        --fg: #e6e7ea;
+        --fg-dim: #9aa0a6;
+        --line: #35373c;
+        --accent: #8d97ff;
+        --danger: #f28b82;
+        --danger-bg: #3a1f1e;
+        --shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    .panel {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 380px;
+      max-width: 100vw;
+      height: 100vh;
+      display: none;
+      flex-direction: column;
+      background: var(--bg);
+      color: var(--fg);
+      border-left: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+            Helvetica, Arial, sans-serif;
+      z-index: 2147483000;
+    }
+
+    :host(.open) .panel { display: flex; }
+
+    .head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .title strong { font-size: 14px; font-weight: 600; }
+    .count { color: var(--fg-dim); font-size: 12px; }
+    .head-actions { display: flex; gap: 4px; flex: none; }
+
+    .icon-btn, .link-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--fg-dim);
+      font: inherit;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .icon-btn:hover, .link-btn:hover { background: var(--bg-sunk); color: var(--fg); }
+    .icon-btn:disabled, .link-btn:disabled { opacity: 0.45; cursor: default; }
+
+    .search { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+
+    .search input {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg-sunk);
+      color: var(--fg);
+      font: inherit;
+    }
+
+    .search input:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: var(--bg);
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .selected-count { margin-left: auto; color: var(--fg-dim); font-size: 12px; }
+
+    .list { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+    .empty, .notice {
+      margin: 0;
+      padding: 24px 16px;
+      color: var(--fg-dim);
+      text-align: center;
+    }
+
+    .notice code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: var(--bg-sunk);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+
+    .foot { padding: 12px 16px; border-top: 1px solid var(--line); }
+
+    .danger {
+      width: 100%;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg-sunk);
+      color: var(--danger);
+      font: inherit;
+      font-weight: 600;
+      padding: 9px 12px;
+      cursor: pointer;
+    }
+
+    .danger:hover:not(:disabled) { background: var(--danger-bg); }
+    .danger:disabled { opacity: 0.45; cursor: default; }
+  `;
 
   const state = {
     open: false,
