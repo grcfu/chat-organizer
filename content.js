@@ -246,6 +246,19 @@
       );
     },
 
+    /* Open a conversation by clicking Gemini's own sidebar row, so it stays an
+       in-app route change rather than a full page load (which would tear down
+       this content script). */
+    async openConversation(chat) {
+      const row = this.findRow(chat);
+      if (!row) throw new Error('Row not found');
+
+      const target = row.querySelector('a[href*="/app/"]') || row;
+      target.scrollIntoView({ block: 'nearest' });
+      target.click();
+      return row;
+    },
+
     /* The confirming button inside the modal, matched by visible text. */
     dialogConfirmButton() {
       const dialog = qsa(CONFIG.SELECTORS.dialog).find((el) => el.offsetParent !== null);
@@ -426,10 +439,15 @@
       background: none;
       border: 0;
       padding: 0;
+      cursor: pointer;
+      border-radius: 3px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    .row-title:hover { color: var(--accent); text-decoration: underline; }
+    .row-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .foot { padding: 12px 16px; border-top: 1px solid var(--line); }
 
@@ -619,8 +637,15 @@
       return;
     }
 
-    const action = event.target.closest('[data-action]')?.dataset.action;
+    const actionEl = event.target.closest('[data-action]');
+    const action = actionEl?.dataset.action;
     if (!action) return;
+
+    if (action === 'jump') {
+      const chat = state.chats.find((c) => c.id === actionEl.dataset.id);
+      if (chat) jumpToChat(chat);
+      return;
+    }
     if (action === 'close') closePanel();
     else if (action === 'refresh') refresh();
     else if (action === 'load-older') loadOlderChats();
@@ -664,6 +689,7 @@
 
   function openPanel() {
     buildPanel();
+  keepPanelMounted();
     state.open = true;
     ui.host.classList.add('open');
     ui.panel.focus();
@@ -940,10 +966,16 @@
       const body = document.createElement('div');
       body.className = 'row-body';
 
-      const title = document.createElement('span');
+      // The title is a button (jump to the chat); selection lives on the
+      // checkbox and the rest of the row, so clicking a title never toggles a
+      // checkbox by accident.
+      const title = document.createElement('button');
+      title.type = 'button';
       title.className = 'row-title';
       title.textContent = chat.title;
-      title.title = chat.title;
+      title.title = `Open \u201c${chat.title}\u201d`;
+      title.dataset.action = 'jump';
+      title.dataset.id = chat.id;
 
       body.appendChild(title);
       row.append(box, body);
@@ -953,6 +985,22 @@
     list.innerHTML = '';
     list.appendChild(frag);
     renderCounters();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Jump to a chat
+  // ---------------------------------------------------------------------------
+
+  /* The primary "what is this chat?" action: open it in the main pane. The
+     panel deliberately stays open, with selection and search intact, so this
+     doesn't interrupt a triage pass. */
+  async function jumpToChat(chat) {
+    try {
+      await adapter.openConversation(chat);
+      setStatus(`Opened \u201c${chat.title}\u201d. The panel stays open \u2014 keep going.`);
+    } catch (err) {
+      setStatus(`Could not open that chat: ${err?.message || err}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1096,9 +1144,26 @@
 
   window.__gcoDiagnose = diagnose;
 
+  // ---------------------------------------------------------------------------
+  // Survive Gemini's client-side navigation. Opening a chat from the panel is
+  // a route change, and Angular sometimes rewrites enough of the document to
+  // drop our host node. Re-attach it and keep the panel's state.
+  // ---------------------------------------------------------------------------
+
+  function keepPanelMounted() {
+    const observer = new MutationObserver(() => {
+      if (ui.host && !ui.host.isConnected) {
+        document.documentElement.appendChild(ui.host);
+      }
+    });
+
+    observer.observe(document.documentElement, { childList: true, subtree: false });
+  }
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'GCO_TOGGLE_PANEL') togglePanel();
   });
 
   buildPanel();
+  keepPanelMounted();
 })();
