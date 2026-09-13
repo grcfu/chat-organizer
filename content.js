@@ -151,6 +151,30 @@
 
     .danger:hover:not(:disabled) { background: var(--danger-bg); }
     .danger:disabled { opacity: 0.45; cursor: default; }
+
+    .fab {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: var(--bg);
+      color: var(--fg);
+      box-shadow: var(--shadow);
+      cursor: pointer;
+      z-index: 2147482999;
+      transition: transform 120ms ease;
+    }
+
+    .fab:hover { transform: translateY(-1px); }
+    :host(.open) .fab { display: none; }
+
+    .fab svg { width: 20px; height: 20px; fill: currentColor; }
   `;
 
   const state = {
@@ -209,6 +233,19 @@
       </footer>
     `;
 
+    const fab = document.createElement('button');
+    fab.className = 'fab';
+    fab.type = 'button';
+    fab.title = 'Open chat organizer';
+    fab.setAttribute('aria-label', 'Open chat organizer');
+    // Inline SVG: no external assets, no CDN.
+    fab.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+      '<path d="M4 6h10v2H4zm0 5h10v2H4zm0 5h7v2H4zM17 6h3v2h-3zm0 5h3v2h-3zm0 5h3v2h-3z"/>' +
+      '</svg>';
+    fab.addEventListener('click', openPanel);
+
+    root.appendChild(fab);
     root.appendChild(panel);
     document.documentElement.appendChild(host);
 
@@ -264,4 +301,6 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'GCO_TOGGLE_PANEL') togglePanel();
   });
+
+  buildPanel();
 })();
