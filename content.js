@@ -290,6 +290,17 @@
 
     .selected-count { margin-left: auto; color: var(--fg-dim); font-size: 12px; }
 
+    .status {
+      margin: 0;
+      padding: 8px 16px;
+      font-size: 12px;
+      color: var(--fg-dim);
+      background: var(--bg-sunk);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .status[hidden] { display: none; }
+
     .list { flex: 1; overflow-y: auto; padding: 4px 0; }
 
     .empty, .notice {
@@ -377,6 +388,8 @@
 
   const state = {
     open: false,
+    loading: false,
+    loadedOnce: false,
     chats: [],
     error: null,
   };
@@ -421,8 +434,11 @@
       <div class="toolbar">
         <button class="link-btn" data-action="select-all">Select all</button>
         <button class="link-btn" data-action="clear">Clear</button>
+        <button class="link-btn" data-action="load-older">Load older</button>
         <span class="selected-count" data-role="selected"></span>
       </div>
+
+      <p class="status" data-role="status" hidden></p>
 
       <div class="list" data-role="list"></div>
 
@@ -459,6 +475,7 @@
     if (!action) return;
     if (action === 'close') closePanel();
     else if (action === 'refresh') refresh();
+    else if (action === 'load-older') loadOlderChats();
   }
 
   // ---------------------------------------------------------------------------
@@ -470,6 +487,10 @@
     state.open = true;
     ui.host.classList.add('open');
     refresh();
+    if (!state.loadedOnce && !state.error) {
+      state.loadedOnce = true;
+      loadOlderChats();
+    }
   }
 
   function closePanel() {
@@ -488,6 +509,13 @@
 
   function $(selector) {
     return ui.root?.querySelector(selector) || null;
+  }
+
+  function setStatus(text) {
+    const el = $('[data-role="status"]');
+    if (!el) return;
+    el.textContent = text || '';
+    el.hidden = !text;
   }
 
   // ---------------------------------------------------------------------------
@@ -523,6 +551,39 @@
 
   function refresh() {
     enumerateChats();
+    render();
+  }
+
+  /* Gemini lazy-loads older conversations as the sidebar scrolls. Drive that
+     by scrolling its container to the bottom a few times, waiting for new rows
+     to appear after each pass. Only chats loaded this way are manageable -
+     the UI says so explicitly. */
+  async function loadOlderChats() {
+    const container = adapter.listContainer();
+    if (!container) {
+      refresh();
+      return;
+    }
+
+    state.loading = true;
+    const previousScroll = container.scrollTop;
+
+    for (let round = 0; round < CONFIG.TIMING.loadMoreRounds; round += 1) {
+      const before = adapter.rowElements().length;
+      setStatus(`Loading older chats\u2026 ${before} so far`);
+      container.scrollTop = container.scrollHeight;
+      await sleep(CONFIG.TIMING.loadMoreSettle);
+      const after = adapter.rowElements().length;
+      if (after === before) break; // nothing new arrived; we've hit the end
+    }
+
+    container.scrollTop = previousScroll;
+    state.loading = false;
+    enumerateChats();
+    setStatus(
+      `${state.chats.length} chats loaded. Only loaded chats can be managed \u2014 ` +
+        'use "Load older" to pull in more.'
+    );
     render();
   }
 
