@@ -306,6 +306,32 @@
       border-radius: 4px;
     }
 
+    .row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 16px;
+      cursor: default;
+    }
+
+    .row:hover { background: var(--bg-sunk); }
+
+    .row-body { min-width: 0; flex: 1; }
+
+    .row-title {
+      display: block;
+      width: 100%;
+      text-align: left;
+      font: inherit;
+      color: var(--fg);
+      background: none;
+      border: 0;
+      padding: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .foot { padding: 12px 16px; border-top: 1px solid var(--line); }
 
     .danger {
@@ -432,6 +458,7 @@
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (!action) return;
     if (action === 'close') closePanel();
+    else if (action === 'refresh') refresh();
   }
 
   // ---------------------------------------------------------------------------
@@ -442,7 +469,7 @@
     buildPanel();
     state.open = true;
     ui.host.classList.add('open');
-    render();
+    refresh();
   }
 
   function closePanel() {
@@ -463,11 +490,104 @@
     return ui.root?.querySelector(selector) || null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Enumeration
+  // ---------------------------------------------------------------------------
+
+  function enumerateChats() {
+    state.error = null;
+
+    if (!adapter.sidebar()) {
+      state.chats = [];
+      state.error =
+        'Could not find Gemini\u2019s sidebar. It may be collapsed, or Google ' +
+        'may have changed the markup.';
+      return;
+    }
+
+    const rows = adapter.rowElements();
+    if (!rows.length) {
+      state.chats = [];
+      state.error =
+        'The sidebar is there, but no conversations matched. The selectors ' +
+        'likely need updating.';
+      return;
+    }
+
+    state.chats = rows.map((el, index) => ({
+      id: adapter.idFor(el, index),
+      title: adapter.titleFor(el) || '(untitled chat)',
+      el,
+    }));
+  }
+
+  function refresh() {
+    enumerateChats();
+    render();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
+  function visibleChats() {
+    return state.chats;
+  }
+
   function render() {
     if (!ui.root) return;
     const list = $('[data-role="list"]');
     if (!list) return;
-    list.innerHTML = '<p class="empty">No chats loaded yet.</p>';
+
+    const countEl = $('[data-role="count"]');
+    if (countEl) {
+      countEl.textContent = state.chats.length
+        ? `${state.chats.length} loaded`
+        : '';
+    }
+
+    if (state.error) {
+      list.innerHTML = '';
+      const notice = document.createElement('p');
+      notice.className = 'notice';
+      notice.textContent = state.error;
+      const hint = document.createElement('p');
+      hint.className = 'notice';
+      hint.innerHTML =
+        'Open the console and run <code>__gcoDiagnose()</code> to dump the ' +
+        'sidebar structure, then update <code>CONFIG.SELECTORS</code> in ' +
+        '<code>content.js</code>.';
+      list.append(notice, hint);
+      return;
+    }
+
+    const chats = visibleChats();
+    if (!chats.length) {
+      list.innerHTML = '<p class="empty">No chats loaded yet.</p>';
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const chat of chats) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.dataset.id = chat.id;
+
+      const body = document.createElement('div');
+      body.className = 'row-body';
+
+      const title = document.createElement('span');
+      title.className = 'row-title';
+      title.textContent = chat.title;
+      title.title = chat.title;
+
+      body.appendChild(title);
+      row.appendChild(body);
+      frag.appendChild(row);
+    }
+
+    list.innerHTML = '';
+    list.appendChild(frag);
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
