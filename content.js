@@ -446,6 +446,29 @@
       cursor: pointer;
     }
 
+    .progress-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      color: var(--fg-dim);
+      font-size: 12px;
+    }
+
+    .progress-track {
+      height: 4px;
+      border-radius: 2px;
+      background: var(--bg-sunk);
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      transition: width 160ms ease;
+    }
+
     .confirm-text { margin: 0 0 10px; color: var(--fg); }
 
     .confirm-actions { display: flex; align-items: center; gap: 8px; }
@@ -493,6 +516,8 @@
     filter: '',
     confirming: false,
     deleting: false,
+    aborted: false,
+    progress: { done: 0, total: 0 },
   };
 
   const ui = { host: null, root: null, panel: null };
@@ -604,6 +629,7 @@
     else if (action === 'delete') requestDelete();
     else if (action === 'confirm-delete') confirmDelete();
     else if (action === 'cancel-delete') cancelDelete();
+    else if (action === 'stop-delete') stopDelete();
   }
 
   function onPanelInput(event) {
@@ -828,6 +854,19 @@
 
     const n = state.selected.size;
 
+    if (state.deleting) {
+      const { done, total } = state.progress;
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      foot.innerHTML = `
+        <div class="progress-row">
+          <span>Deleting ${Math.min(done + 1, total)} / ${total}\u2026</span>
+          <button class="link-btn" data-action="stop-delete">Stop</button>
+        </div>
+        <div class="progress-track"><div class="progress-bar" style="width:${pct}%"></div></div>
+      `;
+      return;
+    }
+
     if (state.confirming) {
       foot.innerHTML = `
         <p class="confirm-text">Delete ${n} chat${n === 1 ? '' : 's'}? This can\u2019t be undone.</p>
@@ -947,10 +986,20 @@
 
   async function runDelete(chats) {
     state.deleting = true;
+    state.aborted = false;
+    state.progress = { done: 0, total: chats.length };
+    renderFooter();
+
     let done = 0;
     let failed = 0;
+    let stopped = false;
 
     for (const chat of chats) {
+      if (state.aborted) {
+        stopped = true;
+        break;
+      }
+
       try {
         await deleteChat(chat);
         state.selected.delete(chat.id);
@@ -960,14 +1009,25 @@
         console.warn(`[GCO] failed to delete "${chat.title}":`, err?.message || err);
       }
 
+      state.progress.done = done + failed;
+      renderFooter();
+
       await sleep(randomDelay());
     }
 
     state.deleting = false;
-    setStatus(
-      failed ? `${done} deleted, ${failed} failed.` : `${done} deleted.`
-    );
+
+    const parts = [`${done} deleted`];
+    if (failed) parts.push(`${failed} failed`);
+    if (stopped) parts.push('stopped early');
+    setStatus(`${parts.join(', ')}.`);
+
     refresh();
+  }
+
+  function stopDelete() {
+    state.aborted = true;
+    setStatus('Stopping after the current chat\u2026');
   }
 
   function requestDelete() {
