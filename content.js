@@ -118,6 +118,45 @@
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const textOf = (el) => (el?.textContent || '').trim().replace(/\s+/g, ' ');
 
+  /* Poll `predicate` until it returns something truthy, or give up.
+     Gemini's menus and dialogs are rendered asynchronously, so every step of
+     the delete flow waits on one of these rather than guessing a delay. */
+  function waitFor(predicate, options = {}) {
+    const timeout = options.timeout ?? CONFIG.TIMING.waitTimeout;
+    const interval = options.interval ?? CONFIG.TIMING.waitInterval;
+    const deadline = Date.now() + timeout;
+
+    return new Promise((resolve, reject) => {
+      (function poll() {
+        let value;
+        try {
+          value = predicate();
+        } catch (err) {
+          reject(err);
+          return;
+        }
+
+        if (value) {
+          resolve(value);
+          return;
+        }
+
+        if (Date.now() >= deadline) {
+          reject(new Error(options.message || 'Timed out waiting for the page'));
+          return;
+        }
+
+        setTimeout(poll, interval);
+      })();
+    });
+  }
+
+  function matchesLabel(el, labels) {
+    const text = textOf(el).toLowerCase();
+    if (!text) return false;
+    return labels.some((label) => text.includes(label));
+  }
+
   function randomDelay() {
     const { deleteDelayMin: min, deleteDelayMax: max } = CONFIG.TIMING;
     return min + Math.random() * (max - min);
@@ -176,6 +215,44 @@
     titleFor(el) {
       const node = el.querySelector(CONFIG.SELECTORS.conversationTitle);
       return textOf(node) || textOf(el);
+    },
+
+    /* Re-find a row from scratch. The sidebar re-renders after every delete,
+       so a stored element reference goes stale immediately - match on the
+       captured id first, fall back to the title. */
+    findRow(chat) {
+      const rows = this.rowElements();
+      const byId = rows.find((el, i) => this.idFor(el, i) === chat.id);
+      if (byId) return byId;
+      return rows.find((el) => this.titleFor(el) === chat.title) || null;
+    },
+
+    /* The kebab is usually only rendered on hover, so fake a hover first. */
+    async revealMoreButton(row) {
+      row.scrollIntoView({ block: 'nearest' });
+      for (const type of ['pointerover', 'mouseover', 'mouseenter', 'mousemove']) {
+        row.dispatchEvent(new MouseEvent(type, { bubbles: true }));
+      }
+      return waitFor(() => qs(CONFIG.SELECTORS.moreButton, row), {
+        timeout: 2000,
+        message: 'Could not find the chat\u2019s options button',
+      });
+    },
+
+    /* The "Delete" entry in the popup menu, matched by visible text. */
+    menuDeleteItem() {
+      return qsa(CONFIG.SELECTORS.menuItem).find(
+        (el) => el.offsetParent !== null && matchesLabel(el, CONFIG.LABELS.delete)
+      );
+    },
+
+    /* The confirming button inside the modal, matched by visible text. */
+    dialogConfirmButton() {
+      const dialog = qsa(CONFIG.SELECTORS.dialog).find((el) => el.offsetParent !== null);
+      if (!dialog) return null;
+      return qsa(CONFIG.SELECTORS.dialogButton, dialog).find((el) =>
+        matchesLabel(el, CONFIG.LABELS.confirm)
+      );
     },
   };
 
@@ -369,6 +446,11 @@
       cursor: pointer;
     }
 
+    .confirm-text { margin: 0 0 10px; color: var(--fg); }
+
+    .confirm-actions { display: flex; align-items: center; gap: 8px; }
+    .confirm-actions .danger { width: auto; flex: 1; }
+
     .danger:hover:not(:disabled) { background: var(--danger-bg); }
     .danger:disabled { opacity: 0.45; cursor: default; }
 
@@ -409,6 +491,8 @@
     lastClickedId: null,
     suppressChange: false,
     filter: '',
+    confirming: false,
+    deleting: false,
   };
 
   const ui = { host: null, root: null, panel: null };
@@ -461,9 +545,7 @@
 
       <div class="list" data-role="list"></div>
 
-      <footer class="foot">
-        <button class="danger" data-action="delete" disabled>Delete selected</button>
-      </footer>
+      <footer class="foot" data-role="foot"></footer>
     `;
 
     const fab = document.createElement('button');
@@ -519,6 +601,9 @@
     else if (action === 'load-older') loadOlderChats();
     else if (action === 'select-all') selectAllVisible();
     else if (action === 'clear') clearSelection();
+    else if (action === 'delete') requestDelete();
+    else if (action === 'confirm-delete') confirmDelete();
+    else if (action === 'cancel-delete') cancelDelete();
   }
 
   function onPanelInput(event) {
@@ -734,8 +819,29 @@
       selectedEl.textContent = n ? `${n} selected` : '';
     }
 
-    const deleteBtn = $('[data-action="delete"]');
-    if (deleteBtn) deleteBtn.disabled = state.selected.size === 0;
+    renderFooter();
+  }
+
+  function renderFooter() {
+    const foot = $('[data-role="foot"]');
+    if (!foot) return;
+
+    const n = state.selected.size;
+
+    if (state.confirming) {
+      foot.innerHTML = `
+        <p class="confirm-text">Delete ${n} chat${n === 1 ? '' : 's'}? This can\u2019t be undone.</p>
+        <div class="confirm-actions">
+          <button class="link-btn" data-action="cancel-delete">Cancel</button>
+          <button class="danger" data-action="confirm-delete">Delete ${n}</button>
+        </div>
+      `;
+      return;
+    }
+
+    foot.innerHTML =
+      `<button class="danger" data-action="delete"${n ? '' : ' disabled'}>` +
+      `Delete selected${n ? ` (${n})` : ''}</button>`;
   }
 
   function render() {
@@ -808,6 +914,78 @@
     list.innerHTML = '';
     list.appendChild(frag);
     renderCounters();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bulk delete
+  // ---------------------------------------------------------------------------
+
+  /* Drive Gemini's own delete flow for a single chat. Every step waits for the
+     async UI rather than sleeping a fixed amount. */
+  async function deleteChat(chat) {
+    const row = adapter.findRow(chat);
+    if (!row) throw new Error('Row not found (already deleted?)');
+
+    const moreButton = await adapter.revealMoreButton(row);
+    moreButton.click();
+
+    const deleteItem = await waitFor(() => adapter.menuDeleteItem(), {
+      message: 'Delete option never appeared in the menu',
+    });
+    deleteItem.click();
+
+    const confirmButton = await waitFor(() => adapter.dialogConfirmButton(), {
+      message: 'Confirmation dialog never appeared',
+    });
+    confirmButton.click();
+
+    // Only move on once the row is actually gone.
+    await waitFor(() => !adapter.findRow(chat), {
+      message: 'Chat still present after confirming delete',
+    });
+  }
+
+  async function runDelete(chats) {
+    state.deleting = true;
+    let done = 0;
+    let failed = 0;
+
+    for (const chat of chats) {
+      try {
+        await deleteChat(chat);
+        state.selected.delete(chat.id);
+        done += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn(`[GCO] failed to delete "${chat.title}":`, err?.message || err);
+      }
+
+      await sleep(randomDelay());
+    }
+
+    state.deleting = false;
+    setStatus(
+      failed ? `${done} deleted, ${failed} failed.` : `${done} deleted.`
+    );
+    refresh();
+  }
+
+  function requestDelete() {
+    if (!state.selected.size) return;
+    state.confirming = true;
+    render();
+  }
+
+  function confirmDelete() {
+    state.confirming = false;
+    const chats = state.chats.filter((chat) => state.selected.has(chat.id));
+    render();
+    runDelete(chats);
+  }
+
+  function cancelDelete() {
+    state.confirming = false;
+    render();
   }
 
   // ---------------------------------------------------------------------------
