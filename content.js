@@ -408,6 +408,7 @@
     selected: new Set(),
     lastClickedId: null,
     suppressChange: false,
+    filter: '',
   };
 
   const ui = { host: null, root: null, panel: null };
@@ -445,7 +446,8 @@
       </header>
 
       <div class="search">
-        <input type="search" data-role="search" placeholder="Search loaded chats" />
+        <input type="search" data-role="search" placeholder="Search loaded chats"
+               autocomplete="off" spellcheck="false" />
       </div>
 
       <div class="toolbar">
@@ -489,6 +491,7 @@
     // Shortcuts are bound to the panel, not the document, so Cmd/Ctrl+A never
     // hijacks select-all elsewhere on the Gemini page.
     panel.addEventListener('keydown', onPanelKeydown);
+    panel.addEventListener('input', onPanelInput);
   }
 
   function onPanelClick(event) {
@@ -516,6 +519,15 @@
     else if (action === 'load-older') loadOlderChats();
     else if (action === 'select-all') selectAllVisible();
     else if (action === 'clear') clearSelection();
+  }
+
+  function onPanelInput(event) {
+    if (event.target?.dataset?.role !== 'search') return;
+    state.filter = event.target.value;
+    // A filter change invalidates the range anchor: the anchor row may no
+    // longer be visible.
+    state.lastClickedId = null;
+    render();
   }
 
   function onPanelChange(event) {
@@ -661,7 +673,9 @@
   // ---------------------------------------------------------------------------
 
   function visibleChats() {
-    return state.chats;
+    const needle = state.filter.trim().toLowerCase();
+    if (!needle) return state.chats;
+    return state.chats.filter((chat) => chat.title.toLowerCase().includes(needle));
   }
 
   function setSelected(id, on) {
@@ -729,11 +743,16 @@
     const list = $('[data-role="list"]');
     if (!list) return;
 
+    const chats = visibleChats();
+
     const countEl = $('[data-role="count"]');
     if (countEl) {
-      countEl.textContent = state.chats.length
-        ? `${state.chats.length} loaded`
-        : '';
+      if (!state.chats.length) countEl.textContent = '';
+      else if (chats.length === state.chats.length) {
+        countEl.textContent = `${state.chats.length} loaded`;
+      } else {
+        countEl.textContent = `${chats.length} of ${state.chats.length}`;
+      }
     }
 
     if (state.error) {
@@ -752,9 +771,10 @@
       return;
     }
 
-    const chats = visibleChats();
     if (!chats.length) {
-      list.innerHTML = '<p class="empty">No chats loaded yet.</p>';
+      list.innerHTML = state.filter
+        ? '<p class="empty">No chats match that search.</p>'
+        : '<p class="empty">No chats loaded yet.</p>';
       renderCounters();
       return;
     }
